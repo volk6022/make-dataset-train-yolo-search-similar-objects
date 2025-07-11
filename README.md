@@ -32,3 +32,5 @@ If it is interesting, first I run pipline of may data without this small NN, the
 All settings is in ```src/settings_and_utils.py```
 
 On my opinion possible way to upgrade objects comparing is to use https://github.com/verlab/accelerated_features as verification method
+
+Also I added some images and debug data emamples: ```collage```, ```debug_image_features```, ```debug_local_features```, ```images_formated```, 

@@ -1,0 +1,32 @@
+[
+    {
+        "object1": {
+            "image_name": "skv.306_керн16-20.jpg",
+            "id": 1
+        },
+        "object2": {
+            "image_name": "skv.306_керн21-25.jpg",
+            "id": 1
+        },
+        "similarity": 0.6723266839981079,
+        "method": "euclidean",
+        "pair_id": 3129,
+        "local_feature_matches": 47,
+        "rotation_verified": false
+    },
+    {
+        "object1": {
+            "image_name": "skv.466а_керн6-10(2).jpg",
+            "id": 1
+        },
+        "object2": {
+            "image_name": "skv.466а_керн6-10.jpg",
+            "id": 3
+        },
+        "similarity": 0.6684516072273254,
+        "method": "euclidean",
+        "pair_id": 5094,
+        "local_feature_matches": 195,
+        "rotation_verified": false
+    }
+]

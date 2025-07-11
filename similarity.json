@@ -1,0 +1,28 @@
+[
+    {
+        "object1": {
+            "image_name": "skv.142801_керн1-5.jpg",
+            "id": 3
+        },
+        "object2": {
+            "image_name": "skv.142802_керн1-5.jpg",
+            "id": 2
+        },
+        "similarity": 0.5835232734680176,
+        "method": "euclidean",
+        "pair_id": 8863
+    },
+    {
+        "object1": {
+            "image_name": "skv.142801_керн1-5.jpg",
+            "id": 3
+        },
+        "object2": {
+            "image_name": "skv.14395_керн1-5.jpg",
+            "id": 3
+        },
+        "similarity": 0.555504560470581,
+        "method": "euclidean",
+        "pair_id": 9095
+    }
+]
