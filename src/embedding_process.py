@@ -32,6 +32,10 @@ def get_device():
 models = {
     'vit_google': 'google/vit-base-patch16-224-in21k',
     'dino': 'facebook/dinov2-large',
+    'dino_giant': 'facebook/dinov2-giant',
+    'clip': 'openai/clip-vit-large-patch14',
+    'siglip': 'google/siglip-so400m-patch14-384',
+    'radio': 'nvidia/RADIO',
     'sd-vae': {
         # 'VAE_MODEL_ID': "stabilityai/sd-vae-ft-mse",
         'VAE_MODEL_ID': "finetuned_vae/vae_epoch_5",
@@ -66,6 +70,33 @@ def init_embedding(embedding_model_name='vit_google', device='cuda'):
             image_processor = AutoImageProcessor.from_pretrained(models[embedding_model_name], use_fast=True)
             embedding_model = AutoModel.from_pretrained(models[embedding_model_name]).to(device)
             embedding_model.eval()
+
+        elif embedding_model_name == 'dino_giant':
+            from transformers import AutoImageProcessor, AutoModel
+            image_processor = AutoImageProcessor.from_pretrained(models[embedding_model_name], use_fast=True)
+            embedding_model = AutoModel.from_pretrained(models[embedding_model_name]).to(device)
+            embedding_model.eval()
+
+        elif embedding_model_name == 'clip':
+            from transformers import CLIPVisionModel, CLIPProcessor
+            image_processor = CLIPProcessor.from_pretrained(models[embedding_model_name])
+            embedding_model = CLIPVisionModel.from_pretrained(models[embedding_model_name]).to(device)
+            embedding_model.eval()
+
+        elif embedding_model_name == 'siglip':
+            from transformers import SiglipVisionModel, AutoProcessor
+            image_processor = AutoProcessor.from_pretrained(models[embedding_model_name])
+            embedding_model = SiglipVisionModel.from_pretrained(models[embedding_model_name]).to(device)
+            embedding_model.eval()
+
+        elif embedding_model_name == 'radio':
+            import timm
+            radio_model = timm.create_model('hf_hub:nvidia/RADIO', pretrained=True).to(device)
+            radio_model.eval()
+            data_config = timm.data.resolve_model_data_config(radio_model)
+            radio_transforms = timm.data.create_transform(**data_config, is_training=False)
+            # Return transforms as image_processor (callable: PIL -> Tensor)
+            return radio_transforms, radio_model, device
 
         elif embedding_model_name == 'sd-vae':
             models[embedding_model_name]['device'] = device
@@ -127,7 +158,43 @@ def get_embedding(image_processor, embedding_model, cropped_obb_cv, device, mode
                 inputs = {k: v.to(device) for k, v in inputs.items() if isinstance(v, torch.Tensor)}
                 outputs = embedding_model(**inputs)
                 embedding = outputs.pooler_output.squeeze(0).cpu().numpy().tolist()
-            
+
+            elif model_name_hint == 'dino_giant':
+                cropped_obb_pil = Image.fromarray(cv2.cvtColor(cropped_obb_cv, cv2.COLOR_BGR2RGB))
+                inputs = image_processor(images=cropped_obb_pil, return_tensors="pt")
+                inputs = {k: v.to(device) for k, v in inputs.items() if isinstance(v, torch.Tensor)}
+                outputs = embedding_model(**inputs)
+                embedding = outputs.pooler_output.squeeze(0).cpu().numpy().tolist()
+
+            elif model_name_hint == 'clip':
+                cropped_obb_pil = Image.fromarray(cv2.cvtColor(cropped_obb_cv, cv2.COLOR_BGR2RGB))
+                inputs = image_processor(images=cropped_obb_pil, return_tensors="pt")
+                inputs = {k: v.to(device) for k, v in inputs.items() if isinstance(v, torch.Tensor)}
+                outputs = embedding_model(**inputs)
+                # CLIPVisionModel returns pooler_output [1, 768] — L2-normalize for cosine similarity
+                feats = outputs.pooler_output
+                feats = feats / feats.norm(p=2, dim=-1, keepdim=True)
+                embedding = feats.squeeze(0).cpu().numpy().tolist()
+
+            elif model_name_hint == 'siglip':
+                cropped_obb_pil = Image.fromarray(cv2.cvtColor(cropped_obb_cv, cv2.COLOR_BGR2RGB))
+                inputs = image_processor(images=cropped_obb_pil, return_tensors="pt")
+                inputs = {k: v.to(device) for k, v in inputs.items() if isinstance(v, torch.Tensor)}
+                outputs = embedding_model(**inputs)
+                # SiglipVisionModel returns pooler_output [1, 1152]
+                feats = outputs.pooler_output
+                feats = feats / feats.norm(p=2, dim=-1, keepdim=True)
+                embedding = feats.squeeze(0).cpu().numpy().tolist()
+
+            elif model_name_hint == 'radio':
+                cropped_obb_pil = Image.fromarray(cv2.cvtColor(cropped_obb_cv, cv2.COLOR_BGR2RGB))
+                # image_processor is the timm transform: PIL -> Tensor [3, H, W]
+                tensor = image_processor(cropped_obb_pil).unsqueeze(0).to(device)
+                outputs = embedding_model(tensor)
+                # RADIO returns (summary, spatial_features); summary is [1, D]
+                summary = outputs[0] if isinstance(outputs, (tuple, list)) else outputs
+                embedding = summary.squeeze(0).cpu().numpy().tolist()
+
             elif model_name_hint == 'sd-vae':
                 cropped_obb_pil = Image.fromarray(cv2.cvtColor(cropped_obb_cv, cv2.COLOR_BGR2RGB))
                 # padded_abb_cv = pad_to_square(cropped_obb_pil)

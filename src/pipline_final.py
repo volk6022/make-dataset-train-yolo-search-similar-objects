@@ -74,7 +74,11 @@ if __name__ == "__main__":
         local_features_check_dispersion=Settings.local_features_check_dispersion,
         local_features_dispersion_grid_cols=Settings.local_features_dispersion_grid_cols,
         local_features_dispersion_grid_rows=Settings.local_features_dispersion_grid_rows,
-        local_features_dispersion_min_occupied_cells_ratio=Settings.local_features_dispersion_min_occupied_cells_ratio
+        local_features_dispersion_min_occupied_cells_ratio=Settings.local_features_dispersion_min_occupied_cells_ratio,
+        xfeat_top_k=Settings.xfeat_top_k,
+        lightglue_extractor=Settings.lightglue_extractor,
+        lightglue_max_keypoints=Settings.lightglue_max_keypoints,
+        lightglue_confidence_threshold=Settings.lightglue_confidence_threshold,
     )
 
     verified_pairs_image_features = similarity_verification.verify_similarities(

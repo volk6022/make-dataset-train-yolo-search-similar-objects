@@ -7,3 +7,12 @@ numba>=0.61.0
 scikit-image>=0.25.2
 ultralytics>=8.3.139
 fastai>=2.8.2
+
+# Modern vision models (embeddings)
+timm>=1.0.11               # RADIO model + general ViT backbones
+open_clip_torch>=2.26.1    # OpenCLIP (RADIO dependency)
+
+# Neural feature matching (verification)
+kornia>=0.8.0              # LightGlue dependency
+# LightGlue: uv add git+https://github.com/cvg/LightGlue
+# XFeat: loaded via torch.hub (no pip install needed), or clone https://github.com/verlab/accelerated_features
