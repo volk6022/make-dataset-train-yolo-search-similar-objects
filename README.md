@@ -1,36 +1,68 @@
 # tools to train yolo and compare detected objects
 
-here is my code for detecting same objects on multiple independent images
-some my own notebooks and python tools to prepare datasets to train yolo.
-datasets prepaired with cvat, so all code is for
+Code for detecting the same objects across multiple independent images (originally developed for soil core images).
+Includes notebooks and Python tools to prepare datasets for YOLO training (datasets labelled with CVAT).
 
-```src/pipline_final.py``` is main file, all starts from here
-main pipline points:
-- load images
-- format images
-- detect objects on images with yolo
-- cut object from image
-- calc cutted object embedding (I used ```facebook/dinov2-large``` as embedding feature exxtraction model)
-- compare embeddings with some treshold (euclidian similarity)
-- verify similar object pairs (i used opencv-sift + skimage-canny)
+`src/pipline_final.py` is the main entry point. Pipeline steps:
 
-or shorter:
-- detect
-- get embedding
-- search similars
-- verify similars
+- load and format images
+- detect objects with YOLO (Oriented Bounding Boxes)
+- crop each detected object
+- extract embedding from cropped object
+- compare embeddings with a similarity threshold
+- verify candidate pairs with feature matching
 
-Pipline creates a lot of not required files, but it is cumfortable to run every single step independently
+Or shorter: **detect → embed → search → verify**
 
-Also I tried to train pretrained vae to get embeddings, but this was bad idea in my case (may be I am wrong and it is usefull).
+The pipeline produces intermediate files at each step so individual stages can be re-run independently.
 
-And I tried to use several verification methods, but in my case object was too similar. Ckeck some compare methods using ```src/image_comparator.py``` + ```src/test_comparing_methods.py```.
+---
 
-And I tried to train some small NN to translate embeddings to anouther tensor which is more compatible for euclidian comparing (```src/similarity_model_learning```). But i has too small dataset and it seems like my model overfitting or i make something wrong.
-If it is interesting, first I run pipline of may data without this small NN, then check answer myself ot get dataset (just deleting not same object pairs from folder with debug data manualy). I think in my case main problem was in classes imbalanse (2 classes: same, not same; not same objects embeddings was about 95% of all pairs)
+## Embedding models
 
-All settings is in ```src/settings_and_utils.py```
+Set `embedding_model_name` in `src/settings_and_utils.py`:
 
-On my opinion possible way to upgrade objects comparing is to use https://github.com/verlab/accelerated_features as verification method
+| Key | Model | Dim | Notes |
+|-----|-------|-----|-------|
+| `siglip` **(default)** | `google/siglip-so400m-patch14-384` | 1152D | 384px input captures fine layered detail; sigmoid-loss calibration gives well-spaced similarity scores |
+| `dino` | `facebook/dinov2-large` | 1024D | Strong texture-aware features |
+| `dino_giant` | `facebook/dinov2-giant` | 1536D | Larger DINOv2; better texture discrimination |
+| `clip` | `openai/clip-vit-large-patch14` | 768D | Semantic visual similarity, L2-normalized |
+| `radio` | `nvidia/RADIO` (via timm) | 768D | Multi-teacher distillation combining DINOv2 + CLIP + SAM |
+| `vit_google` | `google/vit-base-patch16-224-in21k` | 768D | Baseline ViT |
+| `sd-vae` | Stable Diffusion VAE | latent | Experimental; did not improve results in testing |
 
-Also I added some images and debug data emamples: ```collage```, ```debug_image_features```, ```debug_local_features```, ```images_formated```, 
+---
+
+## Verification methods
+
+Set `local_features_method` in `src/settings_and_utils.py`:
+
+| Key | Backend | Notes |
+|-----|---------|-------|
+| `XFEAT` **(default)** | [XFeat](https://github.com/verlab/accelerated_features) via `torch.hub` | Neural keypoints, no install needed, CPU-friendly, handles repetitive textures better than SIFT |
+| `LIGHTGLUE` | [LightGlue](https://github.com/cvg/LightGlue) + SuperPoint/DISK/ALIKED | State-of-the-art transformer matcher; extractor selectable via `lightglue_extractor` |
+| `SIFT` | OpenCV SIFT + FLANN | Classical, reliable baseline |
+| `ORB` | OpenCV ORB + BFMatcher | Faster than SIFT, binary descriptors |
+
+A second image-features pass (EDGE/CORNER/BLOB/TEXTURE) runs in parallel — pairs passing either check are kept.
+
+---
+
+## All settings
+
+All configuration lives in `src/settings_and_utils.py` (`Settings` class).
+
+---
+
+## Experimental / previous attempts
+
+- **VAE fine-tuning** (`src/try_to_finetune_vae.py`): attempted to fine-tune a Stable Diffusion VAE as an embedding extractor. Did not improve results.
+- **Siamese network** (`src/similarity_model_learning/`): small NN to map embeddings to a more Euclidean-comparable space. Limited by small dataset and ~95% class imbalance (non-matching pairs dominated).
+- **Multi-metric comparison** (`src/image_comparator.py` + `src/test_comparing_methods.py`): tested 11 image similarity metrics (SSIM, NCC, histogram, edge, gradient, etc.).
+
+---
+
+## Debug output examples
+
+`collage/`, `debug_image_features/`, `debug_local_features/`, `images_formated/`
