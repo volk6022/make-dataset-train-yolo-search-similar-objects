@@ -62,6 +62,7 @@ if __name__ == "__main__":
         formated_images_folder=Settings.formated_images_folder,
         verification_method=Settings.local_features_verification_method,
         verify_180_rotation=True,
+        max_pairs=Settings.max_candidate_pairs_to_verify,
 
         local_features_min_good_matches=Settings.local_features_min_good_matches,
         local_features_ratio_thresh=Settings.local_features_ratio_thresh,
@@ -87,6 +88,7 @@ if __name__ == "__main__":
         formated_images_folder=Settings.formated_images_folder,
         verification_method=Settings.image_features_verification_method,
         verify_180_rotation=True,
+        max_pairs=Settings.max_candidate_pairs_to_verify,
         image_features_debug_dir=Settings.image_features_EDGE_debug_dir,
         image_features_method=Settings.image_features_EDGE_method,
         image_features_similarity_threshold=Settings.image_features_EDGE_similarity_threshold

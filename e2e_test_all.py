@@ -135,11 +135,13 @@ def step(msg):
 
 # ── Core runners ─────────────────────────────────────────────────────────────
 
-def run_verification(verif_key, verif_dir, predictions_path, similarity_path, verify_kwargs):
+def run_verification(verif_key, verif_dir, predictions_path, similarity_path, verify_kwargs,
+                     max_pairs=None):
     """
     Run one verification pass, save JSON + collages.
     Returns (n_pairs, elapsed_s, error_str | None).
     Skips if similarity_verified.json already exists.
+    max_pairs is forwarded to verify_similarities to cap the candidate list.
     """
     verified_path = os.path.join(verif_dir, 'similarity_verified.json')
     collages_dir  = os.path.join(verif_dir, 'collages')
@@ -161,6 +163,7 @@ def run_verification(verif_key, verif_dir, predictions_path, similarity_path, ve
             formated_images_folder=Settings.formated_images_folder,
             verify_180_rotation=True,
             clean_debug_dir=True,
+            max_pairs=max_pairs,
             **verify_kwargs,
         )
         save_json(verified_path, verified)
@@ -301,6 +304,7 @@ def main():
                 verif_dir = os.path.join(dist_dir, verif_key)
                 n, t, err = run_verification(
                     verif_key, verif_dir, predictions_path, similarity_path,
+                    max_pairs=Settings.max_candidate_pairs_to_verify,
                     verify_kwargs=dict(
                         verification_method='local_features',
                         local_features_method=lf_method,
@@ -333,6 +337,7 @@ def main():
                 verif_dir = os.path.join(dist_dir, verif_key)
                 n, t, err = run_verification(
                     verif_key, verif_dir, predictions_path, similarity_path,
+                    max_pairs=Settings.max_candidate_pairs_to_verify,
                     verify_kwargs=dict(
                         verification_method='contours',
                         contour_binary_threshold_type=Settings.contour_binary_threshold_type,
@@ -358,6 +363,7 @@ def main():
                 verif_dir = os.path.join(dist_dir, verif_key)
                 n, t, err = run_verification(
                     verif_key, verif_dir, predictions_path, similarity_path,
+                    max_pairs=Settings.max_candidate_pairs_to_verify,
                     verify_kwargs=dict(
                         verification_method='image_features',
                         image_features_method=img_method,

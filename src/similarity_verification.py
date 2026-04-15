@@ -949,6 +949,7 @@ def verify_similarities(
         formated_images_folder,
         verification_method, # 'local_features' or 'contours' or 'image_features'
         verify_180_rotation=True,
+        max_pairs=None, # cap pairs before verification; None = no limit
         clean_debug_dir=True,
         # Local feature parameters
         local_features_min_good_matches=10, 
@@ -1043,7 +1044,11 @@ def verify_similarities(
         predictions_with_embeddings = json.load(f)
     with open(sorted_pairs_path, 'r', encoding='utf-8') as f:
         sorted_pairs = json.load(f)
-    
+
+    if max_pairs is not None and len(sorted_pairs) > max_pairs:
+        print(f"Limiting verification to top {max_pairs} of {len(sorted_pairs)} candidate pairs.")
+        sorted_pairs = sorted_pairs[:max_pairs]
+
     potential_matches_count = len(sorted_pairs)
     num_digits_for_sequence = len(str(potential_matches_count)) if potential_matches_count > 0 else 1
 

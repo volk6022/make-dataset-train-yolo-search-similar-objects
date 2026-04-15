@@ -21,6 +21,10 @@ class Settings:
     sim_tresh_cosine = 0.65
     sim_tresh_euclidean = 0.55
     sim_tresh_manhattan = 0.04
+    # Cap on candidate pairs sent to any verifier (sorted by similarity desc).
+    # Prevents runaway runtimes when a loose threshold produces huge candidate sets.
+    # Set to None to disable.
+    max_candidate_pairs_to_verify = 5000
 
     # semilarity verification settings
     # local features verication method settings
