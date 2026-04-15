@@ -3,6 +3,13 @@ E2E comparison test: runs every combination of
   embedding model × distance method × verification method
 and saves results in separate folders for side-by-side comparison.
 
+RESUME SUPPORT: any step whose output file already exists is skipped.
+Delete the output file(s) you want to redo, then re-run.
+
+  predictions_with_embeddings.json  → controls embedding re-extraction
+  {distance}/similarity.json        → controls pair re-search
+  {verifier}/similarity_verified.json → controls re-verification
+
 Output tree:
   e2e_results/
     summary.json
@@ -20,7 +27,6 @@ Output tree:
         image_BLOB/
         image_TEXTURE/
 
-To skip a model or method, comment it out in the CONFIG section below.
 Run with: uv run python e2e_test_all.py
 """
 
@@ -93,10 +99,29 @@ OUTPUT_ROOT = 'e2e_results'
 # ─────────────────────────────────────────────────────────────────────────────
 
 
+# ── Helpers ──────────────────────────────────────────────────────────────────
+
 def save_json(path, data):
     os.makedirs(os.path.dirname(path) or '.', exist_ok=True)
     with open(path, 'w', encoding='utf-8') as f:
         json.dump(data, f, indent=4, ensure_ascii=False)
+
+
+def is_valid_json(path):
+    """Return True if path exists and contains parseable JSON (including empty list/dict)."""
+    if not os.path.isfile(path):
+        return False
+    try:
+        with open(path, 'r', encoding='utf-8') as f:
+            json.load(f)
+        return True
+    except (json.JSONDecodeError, OSError, ValueError):
+        return False
+
+
+def load_json(path):
+    with open(path, 'r', encoding='utf-8') as f:
+        return json.load(f)
 
 
 def header(msg):
@@ -108,18 +133,25 @@ def step(msg):
     print(f"\n  >> {msg}")
 
 
-def run_verification(
-    verif_key,
-    verif_dir,
-    predictions_path,
-    similarity_path,
-    verify_kwargs,
-):
-    """Run one verification pass, save JSON + collages. Returns (n_pairs, elapsed, error)."""
+# ── Core runners ─────────────────────────────────────────────────────────────
+
+def run_verification(verif_key, verif_dir, predictions_path, similarity_path, verify_kwargs):
+    """
+    Run one verification pass, save JSON + collages.
+    Returns (n_pairs, elapsed_s, error_str | None).
+    Skips if similarity_verified.json already exists.
+    """
     verified_path = os.path.join(verif_dir, 'similarity_verified.json')
     collages_dir  = os.path.join(verif_dir, 'collages')
     os.makedirs(verif_dir, exist_ok=True)
 
+    # ── Resume check ──────────────────────────────────────────────────
+    if is_valid_json(verified_path):
+        n = len(load_json(verified_path))
+        print(f"       {verif_key:<22} [CACHED]  {n:>4} verified pairs")
+        return n, 0.0, None
+
+    # ── Run ───────────────────────────────────────────────────────────
     print(f"       {verif_key:<22}", end=' ', flush=True)
     t0 = time.time()
     try:
@@ -148,6 +180,8 @@ def run_verification(
         return 0, round(elapsed, 1), str(e)
 
 
+# ── Main ─────────────────────────────────────────────────────────────────────
+
 def main():
     total_start = time.time()
     summary = {}
@@ -162,12 +196,21 @@ def main():
         target_height=Settings.target_height,
     )
 
-    # ── Load YOLO (once) ─────────────────────────────────────────────
-    header("2. Loading YOLO model")
-    yolo_model = yolo_process.init_yolo(Settings.yolo_model_path)
-    if yolo_model is None:
-        print("ERROR: Could not load YOLO model. Exiting.")
-        return
+    # ── YOLO: load only if at least one predictions file is missing ───
+    yolo_needed = any(
+        not is_valid_json(os.path.join(OUTPUT_ROOT, emb, 'predictions_with_embeddings.json'))
+        for emb in EMBEDDING_MODELS
+    )
+
+    yolo_model = None
+    header("2. YOLO model")
+    if yolo_needed:
+        yolo_model = yolo_process.init_yolo(Settings.yolo_model_path)
+        if yolo_model is None:
+            print("ERROR: Could not load YOLO model. Exiting.")
+            return
+    else:
+        print("  [CACHED] All predictions exist — skipping YOLO load")
 
     # ── Loop: embedding models ────────────────────────────────────────
     for emb_name in EMBEDDING_MODELS:
@@ -178,39 +221,45 @@ def main():
         predictions_path = os.path.join(emb_dir, 'predictions_with_embeddings.json')
         os.makedirs(emb_dir, exist_ok=True)
 
-        # Load model
-        step(f"Loading {emb_name}…")
-        try:
-            image_processor, emb_model, device = embedding_process.init_embedding(
-                embedding_model_name=emb_name
-            )
-            if image_processor is None or (emb_model is None and device is not None):
-                raise RuntimeError("init_embedding returned None — model weights may be missing")
-        except Exception as e:
-            print(f"  [SKIP] {e}")
-            summary[emb_name]['_error'] = f"load: {e}"
-            continue
+        # ── Embeddings: resume check ──────────────────────────────────
+        if is_valid_json(predictions_path):
+            predictions = load_json(predictions_path)
+            n_obj = sum(len(img.get('objects', [])) for img in predictions)
+            step(f"Embeddings [CACHED] — {len(predictions)} images, {n_obj} objects")
+        else:
+            # Load embedding model
+            step(f"Loading {emb_name}…")
+            try:
+                image_processor, emb_model, device = embedding_process.init_embedding(
+                    embedding_model_name=emb_name
+                )
+                if image_processor is None or (emb_model is None and device is not None):
+                    raise RuntimeError("init_embedding returned None — model weights may be missing")
+            except Exception as e:
+                print(f"  [SKIP] {e}")
+                summary[emb_name]['_error'] = f"load: {e}"
+                continue
 
-        # Extract embeddings
-        step("Extracting embeddings…")
-        try:
-            predictions = get_yolo_pred_and_embeddings.process_images_and_extract_embeddings(
-                yolo_model, image_processor, emb_model, emb_name, device,
-                Settings.formated_images_folder,
-            )
-            save_json(predictions_path, predictions)
-            n_objects = sum(len(img.get('objects', [])) for img in predictions)
-            print(f"     {len(predictions)} images, {n_objects} detected objects")
-        except Exception as e:
-            print(f"  [SKIP] Extraction failed: {e}")
-            traceback.print_exc()
-            summary[emb_name]['_error'] = f"extract: {e}"
+            # Extract embeddings
+            step("Extracting embeddings…")
+            try:
+                predictions = get_yolo_pred_and_embeddings.process_images_and_extract_embeddings(
+                    yolo_model, image_processor, emb_model, emb_name, device,
+                    Settings.formated_images_folder,
+                )
+                save_json(predictions_path, predictions)
+                n_obj = sum(len(img.get('objects', [])) for img in predictions)
+                print(f"     {len(predictions)} images, {n_obj} detected objects")
+            except Exception as e:
+                print(f"  [SKIP] Extraction failed: {e}")
+                traceback.print_exc()
+                summary[emb_name]['_error'] = f"extract: {e}"
+                del image_processor, emb_model
+                gc.collect()
+                continue
+
             del image_processor, emb_model
             gc.collect()
-            continue
-
-        del image_processor, emb_model
-        gc.collect()
 
         # ── Loop: distance methods ────────────────────────────────────
         for dist_method in DISTANCE_METHODS:
@@ -221,24 +270,28 @@ def main():
             similarity_path = os.path.join(dist_dir, 'similarity.json')
             os.makedirs(dist_dir, exist_ok=True)
 
-            # Compute candidate pairs
-            try:
-                loaded = searching_similar.load_and_preprocess_data(predictions_path)
-                if not loaded:
-                    raise RuntimeError("No valid objects with embeddings")
-                pairs = searching_similar.find_most_similar_objects_diff_images(
-                    objects=loaded,
-                    sim_tresh=DISTANCE_THRESHOLDS[dist_method],
-                    method=dist_method,
-                    device='cpu',
-                )
-                save_json(similarity_path, pairs)
-                print(f"     {len(pairs)} candidate pairs")
-                del loaded
-            except Exception as e:
-                print(f"  [SKIP] Search failed: {e}")
-                summary[emb_name][dist_method]['_error'] = f"search: {e}"
-                continue
+            # ── Similarity: resume check ──────────────────────────────
+            if is_valid_json(similarity_path):
+                pairs = load_json(similarity_path)
+                print(f"     [CACHED] {len(pairs)} candidate pairs")
+            else:
+                try:
+                    loaded = searching_similar.load_and_preprocess_data(predictions_path)
+                    if not loaded:
+                        raise RuntimeError("No valid objects with embeddings")
+                    pairs = searching_similar.find_most_similar_objects_diff_images(
+                        objects=loaded,
+                        sim_tresh=DISTANCE_THRESHOLDS[dist_method],
+                        method=dist_method,
+                        device='cpu',
+                    )
+                    save_json(similarity_path, pairs)
+                    print(f"     {len(pairs)} candidate pairs")
+                    del loaded
+                except Exception as e:
+                    print(f"  [SKIP] Search failed: {e}")
+                    summary[emb_name][dist_method]['_error'] = f"search: {e}"
+                    continue
 
             print()
 
@@ -320,7 +373,6 @@ def main():
 
     # ── Print and save summary ────────────────────────────────────────
     header("SUMMARY")
-    col_w = 24
 
     for emb_name, dist_results in summary.items():
         print(f"\n  [{emb_name}]")
