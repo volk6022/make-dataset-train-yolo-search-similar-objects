@@ -217,10 +217,13 @@ def draw_bounding_box(image, coordinates, color="red", width=3):
     return image
 
 
-def create_image_collages(output_collages_dir, json_file_path, input_images_dir, annotations_json_path, clean_existing_dir=True):
+def create_image_collages(output_collages_dir, json_file_path, input_images_dir, annotations_json_path, clean_existing_dir=True, max_collages=1000):
     """
     Reads image pairs from a JSON file, draws bounding boxes from an annotations file,
     and creates side-by-side collages with filename format: XXXX_collade_ID1_vs_ID2.jpg
+
+    max_collages: cap on how many collages to write (top-N by list order, which is
+                  descending similarity score). Set to None for no limit.
     """
     # 1. Ensure output directory exists
     if clean_existing_dir:
@@ -242,10 +245,15 @@ def create_image_collages(output_collages_dir, json_file_path, input_images_dir,
         print(f"Error: Expected a list of objects in pairs JSON, but got {type(pairs_data)}.")
         return
     
-    potential_collages_count = len(pairs_data)
-    if potential_collages_count == 0:
+    if not pairs_data:
         print("No structurally valid image pairs found in the JSON to create collages.")
         return
+
+    if max_collages is not None and len(pairs_data) > max_collages:
+        print(f"Limiting collages to top {max_collages} of {len(pairs_data)} pairs.")
+        pairs_data = pairs_data[:max_collages]
+
+    potential_collages_count = len(pairs_data)
 
     # Load annotations
     annotations = load_annotations(annotations_json_path)

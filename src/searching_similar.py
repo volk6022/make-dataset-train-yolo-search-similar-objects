@@ -218,7 +218,6 @@ def find_most_similar_objects_diff_images(objects: list, sim_tresh=0.7, device="
 
     # Sort by similarity in descending order
     sorted_pairs = sorted(object_pairs_similarities, key=lambda x: x["similarity"], reverse=True)
-    sorted_pairs = object_pairs_similarities
 
     # if not sorted_pairs:
     #     print(f"No similar pairs found between different images using method '{method}' with threshold {sim_tresh}.")

@@ -203,6 +203,189 @@ def verify_pair_with_local_features(
     return is_verified_pair, num_good_matches, status_message
 
 
+# --- Lazy-loaded model caches (avoid reloading on every pair) ---
+_xfeat_instance = None
+_lightglue_cache = {}
+
+
+def _get_xfeat():
+    global _xfeat_instance
+    if _xfeat_instance is None:
+        import torch
+        _xfeat_instance = torch.hub.load(
+            'verlab/accelerated_features', 'XFeat', pretrained=True, trust_repo=True
+        )
+    return _xfeat_instance
+
+
+def _get_lightglue(extractor_name, max_keypoints, device):
+    global _lightglue_cache
+    key = (extractor_name, max_keypoints, device)
+    if key not in _lightglue_cache:
+        from lightglue import LightGlue, SuperPoint, DISK, ALIKED
+        extractor_map = {'superpoint': SuperPoint, 'disk': DISK, 'aliked': ALIKED}
+        ExtractorClass = extractor_map.get(extractor_name.lower(), SuperPoint)
+        extractor = ExtractorClass(max_num_keypoints=max_keypoints).eval().to(device)
+        matcher = LightGlue(features=extractor_name.lower()).eval().to(device)
+        _lightglue_cache[key] = (extractor, matcher)
+    return _lightglue_cache[key]
+
+
+def verify_pair_with_xfeat(
+        img1_cv,
+        img2_cv,
+        min_good_matches,
+        top_k,
+        saving_good_matches_path,
+        check_dispersion,
+        dispersion_grid_rows,
+        dispersion_grid_cols,
+        dispersion_min_occupied_cells_ratio
+    ):
+    """Verify a pair using XFeat neural feature matching (torch.hub: verlab/accelerated_features)."""
+    if img1_cv is None or img2_cv is None:
+        return False, 0, "Input image(s) is None"
+    try:
+        xfeat = _get_xfeat()
+        img1_rgb = cv2.cvtColor(img1_cv, cv2.COLOR_BGR2RGB) if len(img1_cv.shape) == 3 else img1_cv
+        img2_rgb = cv2.cvtColor(img2_cv, cv2.COLOR_BGR2RGB) if len(img2_cv.shape) == 3 else img2_cv
+
+        mkpts0, mkpts1 = xfeat.match_xfeat(img1_rgb, img2_rgb, top_k=top_k)
+        num_matches = len(mkpts0)
+
+        if num_matches < min_good_matches:
+            return False, num_matches, f"Not enough XFeat matches ({num_matches} < {min_good_matches})"
+
+        if check_dispersion and num_matches > 0:
+            pts1 = [(float(p[0]), float(p[1])) for p in mkpts0]
+            pts2 = [(float(p[0]), float(p[1])) for p in mkpts1]
+            is_disp1 = check_match_dispersion_grid(
+                pts1, img1_cv.shape, dispersion_grid_rows, dispersion_grid_cols,
+                dispersion_min_occupied_cells_ratio
+            )
+            is_disp2 = check_match_dispersion_grid(
+                pts2, img2_cv.shape, dispersion_grid_rows, dispersion_grid_cols,
+                dispersion_min_occupied_cells_ratio
+            )
+            if not is_disp1 and not is_disp2:
+                return False, num_matches, "XFeat matches not dispersed in both images"
+            elif not is_disp1:
+                return False, num_matches, "XFeat matches not dispersed in image 1"
+            elif not is_disp2:
+                return False, num_matches, "XFeat matches not dispersed in image 2"
+
+        if saving_good_matches_path is not None:
+            try:
+                kp1 = [cv2.KeyPoint(float(p[0]), float(p[1]), 1) for p in mkpts0]
+                kp2 = [cv2.KeyPoint(float(p[0]), float(p[1]), 1) for p in mkpts1]
+                cv_matches = [cv2.DMatch(i, i, 0) for i in range(num_matches)]
+                vis = cv2.drawMatches(
+                    img1_cv, kp1, img2_cv, kp2, cv_matches, None,
+                    flags=cv2.DrawMatchesFlags_NOT_DRAW_SINGLE_POINTS
+                )
+                cv2.imwrite(saving_good_matches_path, vis)
+            except Exception as e:
+                pass  # non-fatal
+
+        return True, num_matches, f"XFeat verified: {num_matches} matches"
+
+    except Exception as e:
+        return False, 0, f"XFeat error: {e}"
+
+
+def verify_pair_with_lightglue(
+        img1_cv,
+        img2_cv,
+        min_good_matches,
+        extractor_name,
+        max_keypoints,
+        confidence_threshold,
+        device,
+        saving_good_matches_path,
+        check_dispersion,
+        dispersion_grid_rows,
+        dispersion_grid_cols,
+        dispersion_min_occupied_cells_ratio
+    ):
+    """Verify a pair using LightGlue + SuperPoint/DISK/ALIKED neural feature matching."""
+    if img1_cv is None or img2_cv is None:
+        return False, 0, "Input image(s) is None"
+    try:
+        import torch
+        extractor, matcher = _get_lightglue(extractor_name, max_keypoints, device)
+
+        def cv2_to_tensor(img):
+            rgb = cv2.cvtColor(img, cv2.COLOR_BGR2RGB) if len(img.shape) == 3 else img
+            t = torch.from_numpy(rgb).float() / 255.0
+            return t.permute(2, 0, 1).unsqueeze(0).to(device)  # [1, 3, H, W]
+
+        img0_t = cv2_to_tensor(img1_cv)
+        img1_t = cv2_to_tensor(img2_cv)
+
+        with torch.no_grad():
+            feats0 = extractor.extract(img0_t)
+            feats1 = extractor.extract(img1_t)
+            result = matcher({'image0': feats0, 'image1': feats1})
+
+        # Remove batch dimension
+        from lightglue.utils import rbd
+        feats0, feats1, result = [rbd(x) for x in [feats0, feats1, result]]
+
+        matches = result['matches']  # (K, 2)
+        scores = result.get('scores', None)
+
+        # Filter by confidence threshold if scores available
+        if scores is not None and confidence_threshold > 0:
+            mask = scores >= confidence_threshold
+            matches = matches[mask]
+
+        if len(matches) == 0:
+            return False, 0, "No LightGlue matches after confidence filtering"
+
+        mkpts0 = feats0['keypoints'][matches[:, 0]].cpu().numpy()
+        mkpts1 = feats1['keypoints'][matches[:, 1]].cpu().numpy()
+        num_matches = len(mkpts0)
+
+        if num_matches < min_good_matches:
+            return False, num_matches, f"Not enough LightGlue matches ({num_matches} < {min_good_matches})"
+
+        if check_dispersion and num_matches > 0:
+            pts1 = [(float(p[0]), float(p[1])) for p in mkpts0]
+            pts2 = [(float(p[0]), float(p[1])) for p in mkpts1]
+            is_disp1 = check_match_dispersion_grid(
+                pts1, img1_cv.shape, dispersion_grid_rows, dispersion_grid_cols,
+                dispersion_min_occupied_cells_ratio
+            )
+            is_disp2 = check_match_dispersion_grid(
+                pts2, img2_cv.shape, dispersion_grid_rows, dispersion_grid_cols,
+                dispersion_min_occupied_cells_ratio
+            )
+            if not is_disp1 and not is_disp2:
+                return False, num_matches, "LightGlue matches not dispersed in both images"
+            elif not is_disp1:
+                return False, num_matches, "LightGlue matches not dispersed in image 1"
+            elif not is_disp2:
+                return False, num_matches, "LightGlue matches not dispersed in image 2"
+
+        if saving_good_matches_path is not None:
+            try:
+                kp1 = [cv2.KeyPoint(float(p[0]), float(p[1]), 1) for p in mkpts0]
+                kp2 = [cv2.KeyPoint(float(p[0]), float(p[1]), 1) for p in mkpts1]
+                cv_matches = [cv2.DMatch(i, i, 0) for i in range(num_matches)]
+                vis = cv2.drawMatches(
+                    img1_cv, kp1, img2_cv, kp2, cv_matches, None,
+                    flags=cv2.DrawMatchesFlags_NOT_DRAW_SINGLE_POINTS
+                )
+                cv2.imwrite(saving_good_matches_path, vis)
+            except Exception as e:
+                pass  # non-fatal
+
+        return True, num_matches, f"LightGlue ({extractor_name}) verified: {num_matches} matches"
+
+    except Exception as e:
+        return False, 0, f"LightGlue error: {e}"
+
+
 # Helper function to log-transform Hu moments (typically called before calculating distance)
 def _log_transform_hu_moments_vector(hu_moments_vec):
     """
@@ -766,6 +949,7 @@ def verify_similarities(
         formated_images_folder,
         verification_method, # 'local_features' or 'contours' or 'image_features'
         verify_180_rotation=True,
+        max_pairs=None, # cap pairs before verification; None = no limit
         clean_debug_dir=True,
         # Local feature parameters
         local_features_min_good_matches=10, 
@@ -793,7 +977,14 @@ def verify_similarities(
         # image features parameters
         image_features_debug_dir = None,
         image_features_method = 'EDGE', # 'EDGE', 'CORNER', 'BLOB', 'TEXTURE'
-        image_features_similarity_threshold = 0.5
+        image_features_similarity_threshold = 0.5,
+        # XFeat parameters (used when local_features_method == 'XFEAT')
+        xfeat_top_k = 4096,
+        # LightGlue parameters (used when local_features_method == 'LIGHTGLUE')
+        lightglue_extractor = 'superpoint',  # 'superpoint', 'disk', 'aliked'
+        lightglue_max_keypoints = 2048,
+        lightglue_confidence_threshold = 0.5,
+        lightglue_device = 'cpu'
     ):
     print(f"Starting verification using method: {verification_method}...")
 #     print(f"""Common parameters:
@@ -802,23 +993,13 @@ def verify_similarities(
 # formated_images_folder: {formated_images_folder}""")
 
     if verification_method == 'local_features':
-#         print(f"""Local feature parameters:
-# min_good_matches: {local_features_min_good_matches}
-# ratio_thresh: {local_features_ratio_thresh}
-# method: {local_features_method}
-# knnMatch_k: {local_features_knnMatch_k}
-# flann_index_kdtree: {local_features_flann_index_kdtree} (SIFT only)
-# flann_index_kdtree_trees: {local_features_flann_index_kdtree_trees} (SIFT only)
-# search_params_checks: {local_features_search_params_checks} (SIFT only)
-# saving_good_matches_dir: {local_features_saving_good_matches_dir}
-# check_dispersion: {local_features_check_dispersion}
-# dispersion_grid_rows: {local_features_dispersion_grid_rows}
-# dispersion_grid_cols: {local_features_dispersion_grid_cols}
-# dispersion_min_occupied_cells_ratio: {local_features_dispersion_min_occupied_cells_ratio}""")
         if clean_debug_dir:
             delete_directory_and_contents(local_features_saving_good_matches_dir)
         if local_features_saving_good_matches_dir:
             os.makedirs(local_features_saving_good_matches_dir, exist_ok=True)
+        if local_features_method not in ['SIFT', 'ORB', 'XFEAT', 'LIGHTGLUE']:
+            print(f"Warning: Unknown local_features_method '{local_features_method}', defaulting to SIFT.")
+            local_features_method = 'SIFT'
     elif verification_method == 'contours':
 #         print(f"""Contour verification parameters:
 # binary_threshold_type: {contour_binary_threshold_type}
@@ -863,7 +1044,11 @@ def verify_similarities(
         predictions_with_embeddings = json.load(f)
     with open(sorted_pairs_path, 'r', encoding='utf-8') as f:
         sorted_pairs = json.load(f)
-    
+
+    if max_pairs is not None and len(sorted_pairs) > max_pairs:
+        print(f"Limiting verification to top {max_pairs} of {len(sorted_pairs)} candidate pairs.")
+        sorted_pairs = sorted_pairs[:max_pairs]
+
     potential_matches_count = len(sorted_pairs)
     num_digits_for_sequence = len(str(potential_matches_count)) if potential_matches_count > 0 else 1
 
@@ -960,22 +1145,53 @@ def verify_similarities(
                 output_filename_attempt1 = f"{sequence_str}_match_{clean_img1_name}_{clean_obj1_id}_vs_{clean_img2_name}_{clean_obj2_id}_orig.jpg"
                 saving_path_attempt1 = os.path.join(local_features_saving_good_matches_dir, output_filename_attempt1)
 
-            is_verified_attempt1, num_matches_attempt1, _ = verify_pair_with_local_features(
-                img1_cv=cropped_obj1_cv, 
-                img2_cv=cropped_obj2_cv, 
-                min_good_matches=local_features_min_good_matches, 
-                ratio_thresh=local_features_ratio_thresh,
-                method=local_features_method,
-                knnMatch_k=local_features_knnMatch_k,
-                flann_index_kdtree=local_features_flann_index_kdtree,
-                flann_index_kdtree_trees=local_features_flann_index_kdtree_trees,
-                search_params_checks=local_features_search_params_checks,
-                saving_good_matches_path=saving_path_attempt1,
-                check_dispersion=local_features_check_dispersion,
-                dispersion_grid_rows=local_features_dispersion_grid_rows,
-                dispersion_grid_cols=local_features_dispersion_grid_cols,
-                dispersion_min_occupied_cells_ratio=local_features_dispersion_min_occupied_cells_ratio
-            )
+            if local_features_method in ['SIFT', 'ORB']:
+                is_verified_attempt1, num_matches_attempt1, _ = verify_pair_with_local_features(
+                    img1_cv=cropped_obj1_cv,
+                    img2_cv=cropped_obj2_cv,
+                    min_good_matches=local_features_min_good_matches,
+                    ratio_thresh=local_features_ratio_thresh,
+                    method=local_features_method,
+                    knnMatch_k=local_features_knnMatch_k,
+                    flann_index_kdtree=local_features_flann_index_kdtree,
+                    flann_index_kdtree_trees=local_features_flann_index_kdtree_trees,
+                    search_params_checks=local_features_search_params_checks,
+                    saving_good_matches_path=saving_path_attempt1,
+                    check_dispersion=local_features_check_dispersion,
+                    dispersion_grid_rows=local_features_dispersion_grid_rows,
+                    dispersion_grid_cols=local_features_dispersion_grid_cols,
+                    dispersion_min_occupied_cells_ratio=local_features_dispersion_min_occupied_cells_ratio
+                )
+            elif local_features_method == 'XFEAT':
+                is_verified_attempt1, num_matches_attempt1, _ = verify_pair_with_xfeat(
+                    img1_cv=cropped_obj1_cv,
+                    img2_cv=cropped_obj2_cv,
+                    min_good_matches=local_features_min_good_matches,
+                    top_k=xfeat_top_k,
+                    saving_good_matches_path=saving_path_attempt1,
+                    check_dispersion=local_features_check_dispersion,
+                    dispersion_grid_rows=local_features_dispersion_grid_rows,
+                    dispersion_grid_cols=local_features_dispersion_grid_cols,
+                    dispersion_min_occupied_cells_ratio=local_features_dispersion_min_occupied_cells_ratio
+                )
+            elif local_features_method == 'LIGHTGLUE':
+                is_verified_attempt1, num_matches_attempt1, _ = verify_pair_with_lightglue(
+                    img1_cv=cropped_obj1_cv,
+                    img2_cv=cropped_obj2_cv,
+                    min_good_matches=local_features_min_good_matches,
+                    extractor_name=lightglue_extractor,
+                    max_keypoints=lightglue_max_keypoints,
+                    confidence_threshold=lightglue_confidence_threshold,
+                    device=lightglue_device,
+                    saving_good_matches_path=saving_path_attempt1,
+                    check_dispersion=local_features_check_dispersion,
+                    dispersion_grid_rows=local_features_dispersion_grid_rows,
+                    dispersion_grid_cols=local_features_dispersion_grid_cols,
+                    dispersion_min_occupied_cells_ratio=local_features_dispersion_min_occupied_cells_ratio
+                )
+            else:
+                is_verified_attempt1, num_matches_attempt1 = False, 0
+
             if is_verified_attempt1:
                 is_verified_final = True
                 final_verification_details["local_feature_matches"] = num_matches_attempt1
@@ -1035,22 +1251,53 @@ def verify_similarities(
                         output_filename_attempt2 = f"{sequence_str}_match_{clean_img1_name}_{clean_obj1_id}_vs_{clean_img2_name}_{clean_obj2_id}_rot180.jpg"
                         saving_path_attempt2 = os.path.join(local_features_saving_good_matches_dir, output_filename_attempt2)
 
-                    is_verified_attempt2, num_matches_attempt2, _ = verify_pair_with_local_features(
-                        img1_cv=cropped_obj1_cv, 
-                        img2_cv=rotated_cropped_obj2_cv,
-                        min_good_matches=local_features_min_good_matches, 
-                        ratio_thresh=local_features_ratio_thresh,
-                        method=local_features_method,
-                        knnMatch_k=local_features_knnMatch_k,
-                        flann_index_kdtree=local_features_flann_index_kdtree,
-                        flann_index_kdtree_trees=local_features_flann_index_kdtree_trees,
-                        search_params_checks=local_features_search_params_checks,
-                        saving_good_matches_path=saving_path_attempt2,
-                        check_dispersion=local_features_check_dispersion,
-                        dispersion_grid_rows=local_features_dispersion_grid_rows,
-                        dispersion_grid_cols=local_features_dispersion_grid_cols,
-                        dispersion_min_occupied_cells_ratio=local_features_dispersion_min_occupied_cells_ratio
-                    )
+                    if local_features_method in ['SIFT', 'ORB']:
+                        is_verified_attempt2, num_matches_attempt2, _ = verify_pair_with_local_features(
+                            img1_cv=cropped_obj1_cv,
+                            img2_cv=rotated_cropped_obj2_cv,
+                            min_good_matches=local_features_min_good_matches,
+                            ratio_thresh=local_features_ratio_thresh,
+                            method=local_features_method,
+                            knnMatch_k=local_features_knnMatch_k,
+                            flann_index_kdtree=local_features_flann_index_kdtree,
+                            flann_index_kdtree_trees=local_features_flann_index_kdtree_trees,
+                            search_params_checks=local_features_search_params_checks,
+                            saving_good_matches_path=saving_path_attempt2,
+                            check_dispersion=local_features_check_dispersion,
+                            dispersion_grid_rows=local_features_dispersion_grid_rows,
+                            dispersion_grid_cols=local_features_dispersion_grid_cols,
+                            dispersion_min_occupied_cells_ratio=local_features_dispersion_min_occupied_cells_ratio
+                        )
+                    elif local_features_method == 'XFEAT':
+                        is_verified_attempt2, num_matches_attempt2, _ = verify_pair_with_xfeat(
+                            img1_cv=cropped_obj1_cv,
+                            img2_cv=rotated_cropped_obj2_cv,
+                            min_good_matches=local_features_min_good_matches,
+                            top_k=xfeat_top_k,
+                            saving_good_matches_path=saving_path_attempt2,
+                            check_dispersion=local_features_check_dispersion,
+                            dispersion_grid_rows=local_features_dispersion_grid_rows,
+                            dispersion_grid_cols=local_features_dispersion_grid_cols,
+                            dispersion_min_occupied_cells_ratio=local_features_dispersion_min_occupied_cells_ratio
+                        )
+                    elif local_features_method == 'LIGHTGLUE':
+                        is_verified_attempt2, num_matches_attempt2, _ = verify_pair_with_lightglue(
+                            img1_cv=cropped_obj1_cv,
+                            img2_cv=rotated_cropped_obj2_cv,
+                            min_good_matches=local_features_min_good_matches,
+                            extractor_name=lightglue_extractor,
+                            max_keypoints=lightglue_max_keypoints,
+                            confidence_threshold=lightglue_confidence_threshold,
+                            device=lightglue_device,
+                            saving_good_matches_path=saving_path_attempt2,
+                            check_dispersion=local_features_check_dispersion,
+                            dispersion_grid_rows=local_features_dispersion_grid_rows,
+                            dispersion_grid_cols=local_features_dispersion_grid_cols,
+                            dispersion_min_occupied_cells_ratio=local_features_dispersion_min_occupied_cells_ratio
+                        )
+                    else:
+                        is_verified_attempt2, num_matches_attempt2 = False, 0
+
                     if is_verified_attempt2:
                         is_verified_final = True
                         final_verification_details["local_feature_matches"] = num_matches_attempt2

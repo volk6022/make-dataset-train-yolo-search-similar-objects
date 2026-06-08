@@ -12,20 +12,27 @@ class Settings:
     # yolo and embedding settings
     yolo_model_path = 'runs/obb/120/train/weights/best.pt'
     output_predictions_json_file = 'predictions_with_embeddings.json'
-    embedding_model_name = 'dino'
+    # embedding_model_name options: 'dino', 'dino_giant', 'clip', 'siglip', 'radio', 'vit_google', 'sd-vae'
+    # siglip recommended for soil cores: 384px input captures layered texture detail
+    embedding_model_name = 'siglip'
 
     # embeddings comparing settings
     output_similarity_json_file = 'similarity.json'
     sim_tresh_cosine = 0.65
     sim_tresh_euclidean = 0.55
     sim_tresh_manhattan = 0.04
+    # Cap on candidate pairs sent to any verifier (sorted by similarity desc).
+    # Prevents runaway runtimes when a loose threshold produces huge candidate sets.
+    # Set to None to disable.
+    max_candidate_pairs_to_verify = 5000
 
     # semilarity verification settings
     # local features verication method settings
     local_features_verification_method = 'local_features'
     local_features_min_good_matches = 20
     local_features_ratio_thresh = 0.8
-    local_features_method = "SIFT" # "SIFT", "ORB"
+    # local_features_method options: "SIFT", "ORB", "XFEAT", "LIGHTGLUE"
+    local_features_method = "XFEAT"
     local_features_knnmatch_k = 2
     local_features_flann_index_kdtree = 1
     local_features_flann_index_kdtree_trees = 20
@@ -35,6 +42,12 @@ class Settings:
     local_features_dispersion_grid_rows=10
     local_features_dispersion_grid_cols=2
     local_features_dispersion_min_occupied_cells_ratio=0.7
+    # XFeat settings (used when local_features_method == 'XFEAT')
+    xfeat_top_k = 4096
+    # LightGlue settings (used when local_features_method == 'LIGHTGLUE')
+    lightglue_extractor = 'superpoint'  # 'superpoint', 'disk', 'aliked'
+    lightglue_max_keypoints = 2048
+    lightglue_confidence_threshold = 0.5
     # contour verification settings
     contour_verification_method = 'contours'
     contour_binary_threshold_type="adaptive" # "otsu", "adaptive", "fixed"
